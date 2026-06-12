@@ -1,0 +1,80 @@
+{
+  "submitted_url": "string",
+  "final_url": "string",
+
+  "redirect_chain": [
+    "string"
+  ],
+
+  "headers": {
+    "header-name": "string or string[]"
+  },
+
+  "tls": {
+    "enabled": true,
+    "issuer": "string",
+    "subject": "string"
+  },
+
+  "rdap_whois": {
+    "domain_age_days": 0,
+    "days_since_updated": 0,
+    "privacy_or_proxy_registration": true,
+    "registrar": "string",
+    "registrant_country": "string",
+    "statuses": [
+      "string"
+    ]
+  },
+
+  "downloads": {
+    "candidates": [
+      {
+        "text": "Download invoice",
+        "url": "https://example.com/invoice.zip",
+        "html": "<a href=\"/invoice.zip\" download>Download invoice</a>"
+      }
+    ],
+    "observed": [
+      {
+        "url": "https://cdn.example.com/invoice.zip",
+        "filename": "invoice.zip",
+        "content_type": "application/zip"
+      }
+    ]
+  },
+
+  "html": {
+    "title": "string",
+
+    "meta": [
+      "raw meta tag string"
+    ],
+
+    "forms": [
+      "raw form html string"
+    ],
+
+    "inputs": [
+      "raw input html string"
+    ],
+
+    "anchors": [
+      "raw anchor html string"
+    ],
+
+    "buttons": [
+      "raw button html string"
+    ],
+
+    "iframes": [
+      "raw iframe html string"
+    ],
+
+    "images": [
+      "raw image html string"
+    ],
+
+    "visible_text": "single newline-preserved visible text block"
+  }
+}

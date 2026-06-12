@@ -1,0 +1,14 @@
+beautifulsoup4==4.12.3
+cryptography==43.0.3
+fastapi==0.115.5
+httpx==0.27.2
+pillow==11.0.0
+pymongo==4.10.1
+python-dotenv==1.0.1
+redis==5.2.0
+rq==2.0.0
+scrapling[fetchers]==0.4.9
+tldextract==5.1.2
+uvicorn[standard]==0.32.1
+pytest==8.3.3
+

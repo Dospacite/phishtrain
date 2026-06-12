@@ -1,0 +1,2 @@
+"""PhishTrain scrape queue API."""
+
