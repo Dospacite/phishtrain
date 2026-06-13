@@ -640,7 +640,7 @@ def dashboard_html() -> str:
       const urlscanState = urlscan.running ? "running" : (urlscan.paused ? "paused" : (urlscan.last_run?.status || "idle"));
       document.getElementById("urlscan-pipeline-file").textContent = urlscan.exists ? urlscan.progress_file : "no progress file";
       document.getElementById("urlscan-pipeline").innerHTML = `
-        <div class="meta">State: ${urlscanState} | pages ${number(urlscan.pages)} | candidates ${number(urlscan.candidates)}</div>
+        <div class="meta">State: ${urlscanState} | mode single-page scrape | pages ${number(urlscan.pages)} | candidates ${number(urlscan.candidates)}</div>
         <div class="lane">
           <div><strong>${number(urlscan.queued)}</strong> queued<br><span class="meta">cached ${number(urlscan.cache_hits)} / skipped ${number(urlscan.skipped)}</span></div>
           <div class="bar"><div class="fill" style="width:${urlscan.running ? 66 : 0}%"></div></div>
