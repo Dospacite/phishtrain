@@ -11,7 +11,10 @@ services:
       URLSCAN_API_KEY: ${URLSCAN_API_KEY}
       REDIS_URL: redis://redis:6379/0
       RQ_QUEUE_NAME: scrape
+      PREFLIGHT_QUEUE_NAME: preflight
       WORKER_CONCURRENCY: "4"
+      PIPELINE_ENQUEUE_BATCH_SIZE: "50"
+      PREFLIGHT_TIMEOUT_SECONDS: "8"
       SCRAPE_WAIT_MS: "10000"
       SCRAPE_URL_TIMEOUT_MS: "30000"
       RQ_JOB_TIMEOUT_SECONDS: "45"
@@ -55,7 +58,10 @@ services:
       SCREENSHOT_BUCKET: screenshots
       REDIS_URL: redis://redis:6379/0
       RQ_QUEUE_NAME: scrape
+      PREFLIGHT_QUEUE_NAME: preflight
       WORKER_CONCURRENCY: "4"
+      PIPELINE_ENQUEUE_BATCH_SIZE: "50"
+      PREFLIGHT_TIMEOUT_SECONDS: "8"
       SCRAPE_WAIT_MS: "10000"
       SCRAPE_URL_TIMEOUT_MS: "30000"
       RQ_JOB_TIMEOUT_SECONDS: "45"
@@ -67,6 +73,34 @@ services:
       ALLOW_PRIVATE_URLS: "false"
     command: ["python", "-m", "app.worker"]
     shm_size: "1gb"
+    depends_on:
+      - redis
+
+  preflight-worker:
+    build: .
+    environment:
+      MONGO_URI: ${MONGO_URI}
+      MONGO_DB: phishtrain
+      MONGO_COLLECTION: raw
+      MONGO_JOBS_COLLECTION: jobs
+      MONGO_CURATED_COLLECTION: curated
+      SCREENSHOT_BUCKET: screenshots
+      REDIS_URL: redis://redis:6379/0
+      RQ_QUEUE_NAME: preflight
+      PREFLIGHT_QUEUE_NAME: preflight
+      WORKER_CONCURRENCY: "12"
+      PIPELINE_ENQUEUE_BATCH_SIZE: "50"
+      PREFLIGHT_TIMEOUT_SECONDS: "8"
+      SCRAPE_WAIT_MS: "10000"
+      SCRAPE_URL_TIMEOUT_MS: "30000"
+      RQ_JOB_TIMEOUT_SECONDS: "45"
+      SPIDER_MAX_CHILD_PAGES: "25"
+      SPIDER_CANDIDATE_LIMIT: "120"
+      SPIDER_PAGE_WAIT_MS: "1500"
+      SPIDER_PAGE_TIMEOUT_MS: "8000"
+      SPIDER_JOB_TIMEOUT_SECONDS: "180"
+      ALLOW_PRIVATE_URLS: "false"
+    command: ["python", "-m", "app.worker"]
     depends_on:
       - redis
 

@@ -4,13 +4,13 @@ from app.scraper import ScrapeArtifact
 from app.settings import Settings
 
 
-def test_worker_concurrency_is_capped_at_four(monkeypatch):
+def test_worker_concurrency_allows_preflight_pool_size(monkeypatch):
     from app import settings as settings_module
 
-    monkeypatch.setenv("WORKER_CONCURRENCY", "8")
+    monkeypatch.setenv("WORKER_CONCURRENCY", "20")
     settings_module = importlib.reload(settings_module)
 
-    assert settings_module.Settings().worker_concurrency == 4
+    assert settings_module.Settings().worker_concurrency == 12
 
 
 def test_worker_main_starts_pool_with_configured_concurrency(monkeypatch):

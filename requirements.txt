@@ -1,4 +1,5 @@
 beautifulsoup4==4.12.3
+aiohttp==3.11.11
 cryptography==43.0.3
 docker==7.1.0
 fastapi==0.115.5

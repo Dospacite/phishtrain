@@ -8,9 +8,9 @@ from typing import Callable
 
 from rq import Queue
 
-from app.jobs import create_or_enqueue_scrape_job
 from app.models import JOB_QUEUED
-from app.queue import get_queue
+from app.preflight import create_or_enqueue_preflight_job
+from app.queue import get_preflight_queue
 from app.settings import Settings, get_settings
 from app.storage import MongoStorage
 from app.urlscan import search_phishing_candidate_page
@@ -76,10 +76,13 @@ def queue_urlscan_phishing_jobs(
     progress = load_progress(progress_path, continue_run)
     search_after = progress.get("search_after") if isinstance(progress.get("search_after"), str) else None
     page_limit = settings.urlscan_pipeline_max_pages if max_pages is None else max_pages
+    batch_limit = settings.pipeline_enqueue_batch_size
     pages = candidates_count = queued = cache_hits = skipped = 0
 
     while page_limit <= 0 or pages < page_limit:
         if should_pause and should_pause():
+            break
+        if queued >= batch_limit:
             break
 
         page = search_phishing_candidate_page(settings, search_after=search_after)
@@ -90,7 +93,11 @@ def queue_urlscan_phishing_jobs(
 
         pages += 1
         page_candidates = page_queued = page_cache_hits = page_skipped = 0
+        batch_full = False
         for candidate in page.candidates:
+            if queued >= batch_limit:
+                batch_full = True
+                break
             candidates_count += 1
             page_candidates += 1
             if storage.dataset_candidate_exists(scan_id=candidate.scan_id, url=candidate.submitted_url):
@@ -98,8 +105,9 @@ def queue_urlscan_phishing_jobs(
                 page_skipped += 1
                 continue
 
-            handle = create_or_enqueue_scrape_job(
+            handle = create_or_enqueue_preflight_job(
                 submitted_url=candidate.submitted_url,
+                mode="scrape",
                 force_new=force_new,
                 storage=storage,
                 queue=queue,
@@ -116,8 +124,9 @@ def queue_urlscan_phishing_jobs(
                 skipped += 1
                 page_skipped += 1
 
-        search_after = page.search_after
-        progress["search_after"] = search_after
+        if not batch_full:
+            search_after = page.search_after
+            progress["search_after"] = search_after
         progress["pages"] = int(progress.get("pages", 0)) + 1
         progress["candidates"] = int(progress.get("candidates", 0)) + page_candidates
         progress["queued"] = int(progress.get("queued", 0)) + page_queued
@@ -125,7 +134,7 @@ def queue_urlscan_phishing_jobs(
         progress["skipped"] = int(progress.get("skipped", 0)) + page_skipped
         save_progress(progress_path, progress)
 
-        if not page.has_more:
+        if batch_full or not page.has_more:
             break
 
     return UrlscanPipelineSummary(pages=pages, candidates=candidates_count, queued=queued, cache_hits=cache_hits, skipped=skipped)
@@ -135,7 +144,7 @@ def main() -> None:
     settings = get_settings()
     storage = MongoStorage(settings)
     storage.ensure_indexes()
-    queue = get_queue(settings)
+    queue = get_preflight_queue(settings)
     summary = queue_urlscan_phishing_jobs(
         storage=storage,
         queue=queue,

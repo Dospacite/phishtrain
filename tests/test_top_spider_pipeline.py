@@ -91,6 +91,8 @@ def test_pipeline_interleaves_start_positions_and_updates_tqdm(tmp_path, monkeyp
         "https://f.test/",
     ]
     assert len(queue.enqueued) == 6
+    assert {item[0].__name__ for item in queue.enqueued} == {"run_preflight_job"}
+    assert {job["preflight"]["mode"] for job in storage.created} == {"spider"}
     assert summary.processed == 6
     assert summary.queued == 6
     assert FakeTqdm.instances[0].total == 6
@@ -167,6 +169,7 @@ def test_pipeline_counts_cache_hits_without_queueing(tmp_path, monkeypatch):
     assert summary.cache_hits == 1
     assert summary.queued == 1
     assert len(queue.enqueued) == 1
+    assert queue.enqueued[0][0].__name__ == "run_preflight_job"
     assert storage.created[0]["status"] == "succeeded"
     assert storage.created[1]["status"] == "queued"
 
@@ -195,6 +198,28 @@ def test_pipeline_stops_cleanly_when_pause_hook_requests_pause(tmp_path, monkeyp
     assert summary.processed == 1
     assert [job["submitted_url"] for job in storage.created] == ["https://a.test/"]
     assert json.loads(progress_path.read_text())["next_ranks"] == {"1": 2}
+
+
+def test_pipeline_honors_enqueue_batch_cap(tmp_path, monkeypatch):
+    csv_path = tmp_path / "top-1m.csv"
+    progress_path = tmp_path / "progress.json"
+    write_top_csv(csv_path, [f"{index}.test" for index in range(1, 8)])
+    storage = FakeStorage()
+    queue = FakeQueue()
+
+    summary = queue_top_1m_spider_jobs(
+        csv_path=csv_path,
+        storage=storage,
+        queue=queue,
+        settings=Settings(pipeline_enqueue_batch_size=3),
+        progress_path=progress_path,
+        start_positions=(1,),
+        show_progress=False,
+    )
+
+    assert summary.queued == 3
+    assert len(queue.enqueued) == 3
+    assert [job["submitted_url"] for job in storage.created] == ["https://1.test/", "https://2.test/", "https://3.test/"]
 
 
 def test_parser_exposes_continue_option():

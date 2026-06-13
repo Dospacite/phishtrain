@@ -18,3 +18,7 @@ def get_queue(settings: Settings | None = None) -> Queue:
     settings = settings or get_settings()
     return Queue(settings.rq_queue_name, connection=get_redis_connection(settings.redis_url))
 
+
+def get_preflight_queue(settings: Settings | None = None) -> Queue:
+    settings = settings or get_settings()
+    return Queue(settings.preflight_queue_name, connection=get_redis_connection(settings.redis_url))

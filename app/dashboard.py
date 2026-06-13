@@ -16,14 +16,14 @@ from rq import Queue
 
 from app.models import JOB_FAILED, JOB_QUEUED, JOB_RUNNING, JOB_SUCCEEDED, JOB_TIMEOUT
 from app.models import CuratedDatasetRequest, SkipDatasetRequest
-from app.queue import get_queue
+from app.queue import get_preflight_queue, get_queue
 from app.settings import Settings, get_settings
 from app.storage import MongoStorage, project_api_result, reference_options_for_document, resolve_json_pointer, serialize_job
 from app.top_spider_pipeline import DEFAULT_START_POSITIONS, queue_top_1m_spider_jobs, rank_ranges
 from app.urlscan_pipeline import queue_urlscan_phishing_jobs
 
 
-LOG_SERVICES = ("api", "worker", "redis")
+LOG_SERVICES = ("api", "worker", "preflight-worker", "redis")
 security = HTTPBasic(auto_error=False)
 _pipeline_lock = threading.Lock()
 _pipeline_thread: threading.Thread | None = None
@@ -108,7 +108,7 @@ def _run_pipeline(settings: Settings) -> None:
     try:
         storage = MongoStorage(settings)
         storage.ensure_indexes()
-        queue = get_queue(settings)
+        queue = get_preflight_queue(settings)
         summary = queue_top_1m_spider_jobs(
             csv_path=Path(settings.top_1m_pipeline_csv_path),
             storage=storage,
@@ -237,7 +237,7 @@ def _run_urlscan_pipeline(settings: Settings) -> None:
     try:
         storage = MongoStorage(settings)
         storage.ensure_indexes()
-        queue = get_queue(settings)
+        queue = get_preflight_queue(settings)
         summary = queue_urlscan_phishing_jobs(
             storage=storage,
             queue=queue,
@@ -385,6 +385,9 @@ def dashboard_payload(storage: MongoStorage, queue: Queue, settings: Settings) -
             "mongo_collection": settings.mongo_collection,
             "jobs_collection": settings.mongo_jobs_collection,
             "worker_concurrency": settings.worker_concurrency,
+            "preflight_queue_name": settings.preflight_queue_name,
+            "preflight_timeout_seconds": settings.preflight_timeout_seconds,
+            "pipeline_enqueue_batch_size": settings.pipeline_enqueue_batch_size,
             "rq_job_timeout_seconds": settings.rq_job_timeout_seconds,
             "spider_job_timeout_seconds": settings.spider_job_timeout_seconds,
             "allow_private_urls": settings.allow_private_urls,
@@ -656,11 +659,14 @@ def dashboard_html() -> str:
       const services = (data.docker.services || []).map(s => `${{s.service}}: ${{s.status}}`).join(" | ");
       document.getElementById("ops").innerHTML = Object.entries({
         "Queue": data.queue.name,
+        "Preflight queue": data.settings.preflight_queue_name,
         "Redis": data.settings.redis_url,
         "Mongo DB": data.settings.mongo_db,
         "Raw collection": data.settings.mongo_collection,
         "Jobs collection": data.settings.jobs_collection,
         "Worker concurrency": data.settings.worker_concurrency,
+        "Pipeline batch cap": data.settings.pipeline_enqueue_batch_size,
+        "Preflight timeout": `${{data.settings.preflight_timeout_seconds}}s`,
         "Scrape timeout": `${{data.settings.rq_job_timeout_seconds}}s`,
         "Spider timeout": `${{data.settings.spider_job_timeout_seconds}}s`,
         "Docker": data.docker.available ? services : data.docker.error

@@ -12,9 +12,9 @@ from typing import Callable, Iterable, Sequence
 from rq import Queue
 from tqdm import tqdm
 
-from app.jobs import create_or_enqueue_spider_job
 from app.models import JOB_QUEUED
-from app.queue import get_queue
+from app.preflight import create_or_enqueue_preflight_job
+from app.queue import get_preflight_queue
 from app.settings import Settings, get_settings
 from app.storage import MongoStorage
 from app.url_safety import UrlValidationError, normalize_url
@@ -195,6 +195,7 @@ def queue_top_1m_spider_jobs(
 
     remaining = _remaining_count(ranks, ranges, next_ranks)
     total = min(remaining, limit) if limit is not None else remaining
+    batch_limit = settings.pipeline_enqueue_batch_size
     processed = queued = cache_hits = skipped = 0
     save_every = max(1, state_save_interval)
 
@@ -204,9 +205,12 @@ def queue_top_1m_spider_jobs(
                 break
             if limit is not None and processed >= limit:
                 break
+            if queued >= batch_limit:
+                break
 
-            handle = create_or_enqueue_spider_job(
+            handle = create_or_enqueue_preflight_job(
                 submitted_url=site.url,
+                mode="spider",
                 force_new=force_new,
                 storage=storage,
                 queue=queue,
@@ -254,7 +258,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     settings = get_settings()
     storage = MongoStorage(settings)
     storage.ensure_indexes()
-    queue = get_queue(settings)
+    queue = get_preflight_queue(settings)
 
     summary = queue_top_1m_spider_jobs(
         csv_path=args.csv or Path(settings.top_1m_pipeline_csv_path),

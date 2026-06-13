@@ -316,6 +316,7 @@ class MongoStorage:
         cache_hit: bool = False,
         raw_id: Any = None,
         dataset: dict[str, Any] | None = None,
+        preflight: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         now = utc_now()
         doc = {
@@ -332,6 +333,8 @@ class MongoStorage:
             doc["finished_at"] = now
         if dataset:
             doc["dataset"] = dataset
+        if preflight:
+            doc["preflight"] = preflight
         self.jobs.insert_one(doc)
         return doc
 
@@ -382,6 +385,8 @@ class MongoStorage:
         if url:
             clauses.append({"submitted_url": url})
         if clauses and self.jobs.find_one({"dataset.kind": "urlscan_phishing", "$or": clauses}, {"_id": 1}):
+            return True
+        if clauses and self.jobs.find_one({"preflight.dataset.kind": "urlscan_phishing", "$or": clauses}, {"_id": 1}):
             return True
         return False
 
@@ -552,6 +557,21 @@ class MongoStorage:
         self.jobs.update_one(
             {"job_id": job_id},
             {"$set": {"status": JOB_SUCCEEDED, "raw_id": raw_id, "finished_at": now, "updated_at": now}, "$unset": {"error": ""}},
+        )
+
+    def mark_preflight_succeeded(self, job_id: str, downstream: dict[str, Any]) -> None:
+        now = utc_now()
+        self.jobs.update_one(
+            {"job_id": job_id},
+            {
+                "$set": {
+                    "status": JOB_SUCCEEDED,
+                    "downstream": downstream,
+                    "finished_at": now,
+                    "updated_at": now,
+                },
+                "$unset": {"error": ""},
+            },
         )
 
     def mark_job_failed(self, job_id: str, error: str, raw_id: Any = None) -> None:
