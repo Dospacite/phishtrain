@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from redis import Redis
 from rq import Queue
 
+from app.dashboard import create_dashboard_router
 from app.jobs import create_or_enqueue_scrape_job, create_or_enqueue_spider_job
 from app.models import JOB_FAILED, JOB_QUEUED, JOB_RUNNING, JOB_SUCCEEDED, JOB_TIMEOUT, ScrapeRequest, SpiderRequest
 from app.queue import get_queue
@@ -44,6 +45,9 @@ def storage_dep() -> MongoStorage:
 
 def queue_dep(settings: Settings = Depends(get_settings)) -> Queue:
     return get_queue(settings)
+
+
+app.include_router(create_dashboard_router(storage_dep, queue_dep))
 
 
 @app.post("/scrape")

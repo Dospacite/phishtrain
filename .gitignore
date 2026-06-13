@@ -4,3 +4,4 @@ __pycache__/
 .pytest_cache/
 *.py[cod]
 top-1m.csv
+top-1m-spider-progress.json

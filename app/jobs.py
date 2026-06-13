@@ -25,6 +25,7 @@ def create_or_enqueue_scrape_job(
     storage: MongoStorage,
     queue: Queue,
     settings: Settings,
+    dataset: dict | None = None,
 ) -> JobHandle:
     cache_key = cache_key_for_url(submitted_url)
     job_id = make_job_id()
@@ -39,13 +40,25 @@ def create_or_enqueue_scrape_job(
                 status=JOB_SUCCEEDED,
                 cache_hit=True,
                 raw_id=cached["_id"],
+                dataset=dataset,
             )
             return handle_for_job(job_id, JOB_SUCCEEDED, True)
 
-    storage.create_job(job_id=job_id, submitted_url=submitted_url, cache_key=cache_key, status=JOB_QUEUED, cache_hit=False)
+    storage.create_job(
+        job_id=job_id,
+        submitted_url=submitted_url,
+        cache_key=cache_key,
+        status=JOB_QUEUED,
+        cache_hit=False,
+        dataset=dataset,
+    )
     from app.worker import run_scrape_job
 
-    queue.enqueue(run_scrape_job, job_id, job_timeout=settings.rq_job_timeout_seconds, retry=None, result_ttl=0, failure_ttl=0)
+    try:
+        queue.enqueue(run_scrape_job, job_id, job_timeout=settings.rq_job_timeout_seconds, retry=None, result_ttl=0, failure_ttl=0)
+    except Exception:
+        storage.delete_job(job_id)
+        raise
     return handle_for_job(job_id, JOB_QUEUED, False)
 
 

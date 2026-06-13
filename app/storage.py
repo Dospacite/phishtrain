@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 from datetime import datetime
 from typing import Any
 
 from bson import ObjectId
 from gridfs import GridFSBucket
+from gridfs.errors import NoFile
 from pymongo import ASCENDING, DESCENDING, MongoClient
 from pymongo.errors import CollectionInvalid
 
@@ -53,6 +55,82 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, list):
         return [_jsonable(item) for item in value]
     return value
+
+
+def _pointer_escape(value: str) -> str:
+    return value.replace("~", "~0").replace("/", "~1")
+
+
+def _pointer_unescape(value: str) -> str:
+    return value.replace("~1", "/").replace("~0", "~")
+
+
+def _pointer_for_path(path: list[str]) -> str:
+    return "/" + "/".join(_pointer_escape(part) for part in path)
+
+
+def _label_for_path(path: list[str]) -> str:
+    label = ""
+    for part in path:
+        if part.isdigit():
+            label += f"[{part}]"
+        else:
+            label = part if not label else f"{label}.{part}"
+    return label or "$"
+
+
+def _preview(value: Any, limit: int = 240) -> str:
+    if isinstance(value, str):
+        text = value
+    else:
+        text = json.dumps(_jsonable(value), ensure_ascii=False, sort_keys=True)
+    text = " ".join(text.split())
+    return text if len(text) <= limit else f"{text[: limit - 3]}..."
+
+
+def resolve_json_pointer(document: Any, pointer: str) -> Any:
+    if not pointer.startswith("/"):
+        raise ValueError("Reference pointer must start with /")
+    current = document
+    for raw_part in pointer.split("/")[1:]:
+        part = _pointer_unescape(raw_part)
+        if isinstance(current, list):
+            if not part.isdigit():
+                raise ValueError(f"Invalid list reference: {pointer}")
+            index = int(part)
+            if index >= len(current):
+                raise ValueError(f"Reference is out of range: {pointer}")
+            current = current[index]
+        elif isinstance(current, dict):
+            if part not in current:
+                raise ValueError(f"Reference does not exist: {pointer}")
+            current = current[part]
+        else:
+            raise ValueError(f"Reference cannot be resolved: {pointer}")
+    return current
+
+
+def reference_options_for_document(document: dict[str, Any]) -> list[dict[str, str]]:
+    options: list[dict[str, str]] = []
+
+    def walk(value: Any, path: list[str]) -> None:
+        if isinstance(value, dict):
+            if not value and path:
+                options.append({"pointer": _pointer_for_path(path), "label": _label_for_path(path), "preview": "{}"})
+            for key in sorted(value):
+                walk(value[key], [*path, str(key)])
+            return
+        if isinstance(value, list):
+            if not value and path:
+                options.append({"pointer": _pointer_for_path(path), "label": _label_for_path(path), "preview": "[]"})
+            for index, item in enumerate(value):
+                walk(item, [*path, str(index)])
+            return
+        if path:
+            options.append({"pointer": _pointer_for_path(path), "label": _label_for_path(path), "preview": _preview(value)})
+
+    walk(document, [])
+    return options
 
 
 def project_api_result(raw_doc: dict[str, Any] | None) -> dict[str, Any]:
@@ -116,6 +194,7 @@ class MongoStorage:
         self.db = self.client[settings.mongo_db]
         self.raw = self.db[settings.mongo_collection]
         self.jobs = self.db[settings.mongo_jobs_collection]
+        self.curated = self.db[settings.mongo_curated_collection]
         self.screenshot_bucket = GridFSBucket(self.db, bucket_name=settings.screenshot_bucket)
 
     def ping(self) -> None:
@@ -133,6 +212,11 @@ class MongoStorage:
                 self.db.create_collection(self.settings.mongo_jobs_collection)
             except CollectionInvalid:
                 pass
+        if self.settings.mongo_curated_collection not in existing:
+            try:
+                self.db.create_collection(self.settings.mongo_curated_collection)
+            except CollectionInvalid:
+                pass
 
         self.raw.create_index([("url_key", ASCENDING)], unique=True, sparse=True)
         self.raw.create_index([("cache_keys", ASCENDING), ("fetched_at", DESCENDING)])
@@ -141,6 +225,11 @@ class MongoStorage:
         self.raw.create_index([("final_url", ASCENDING)])
         self.jobs.create_index([("job_id", ASCENDING)], unique=True)
         self.jobs.create_index([("status", ASCENDING), ("created_at", DESCENDING)])
+        self.jobs.create_index([("dataset.kind", ASCENDING), ("updated_at", DESCENDING)])
+        self.jobs.create_index([("dataset.urlscan.scan_id", ASCENDING)], sparse=True)
+        self.curated.create_index([("raw_id", ASCENDING)], unique=True, sparse=True)
+        self.curated.create_index([("decision", ASCENDING), ("created_at", DESCENDING)])
+        self.curated.create_index([("urlscan.scan_id", ASCENDING)], sparse=True)
 
     def find_latest_successful(self, cache_key: str) -> dict[str, Any] | None:
         return self.raw.find_one(
@@ -226,6 +315,7 @@ class MongoStorage:
         status: str = JOB_QUEUED,
         cache_hit: bool = False,
         raw_id: Any = None,
+        dataset: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         now = utc_now()
         doc = {
@@ -240,11 +330,212 @@ class MongoStorage:
         if raw_id is not None:
             doc["raw_id"] = raw_id
             doc["finished_at"] = now
+        if dataset:
+            doc["dataset"] = dataset
         self.jobs.insert_one(doc)
         return doc
 
     def get_job(self, job_id: str) -> dict[str, Any] | None:
         return self.jobs.find_one({"job_id": job_id})
+
+    def job_status_counts(self) -> dict[str, int]:
+        counts = {status: 0 for status in (JOB_QUEUED, JOB_RUNNING, JOB_SUCCEEDED, JOB_FAILED, JOB_TIMEOUT)}
+        for row in self.jobs.aggregate([{"$group": {"_id": "$status", "count": {"$sum": 1}}}]):
+            status = row.get("_id")
+            if status:
+                counts[str(status)] = int(row.get("count", 0))
+        return counts
+
+    def recent_jobs(self, statuses: list[str] | None = None, limit: int = 25) -> list[dict[str, Any]]:
+        query: dict[str, Any] = {}
+        if statuses:
+            query["status"] = {"$in": statuses}
+        return list(self.jobs.find(query).sort("updated_at", DESCENDING).limit(limit))
+
+    def raw_status_counts(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for row in self.raw.aggregate([{"$group": {"_id": "$status", "count": {"$sum": 1}}}]):
+            status = str(row.get("_id") or "unknown")
+            counts[status] = int(row.get("count", 0))
+        return counts
+
+    def raw_capture_count(self) -> int:
+        return int(self.raw.count_documents({}))
+
+    def dataset_decision_exists(self, *, raw_id: Any = None, scan_id: str | None = None, url: str | None = None) -> bool:
+        clauses: list[dict[str, Any]] = []
+        oid = _object_id(raw_id)
+        if oid:
+            clauses.append({"raw_id": oid})
+        if scan_id:
+            clauses.append({"urlscan.scan_id": scan_id})
+        if url:
+            clauses.extend([{"raw_url": url}, {"final_url": url}, {"urlscan.submitted_url": url}, {"urlscan.page_url": url}])
+        return bool(clauses and self.curated.find_one({"$or": clauses}, {"_id": 1}))
+
+    def dataset_candidate_exists(self, *, scan_id: str | None = None, url: str | None = None) -> bool:
+        if self.dataset_decision_exists(scan_id=scan_id, url=url):
+            return True
+        clauses: list[dict[str, Any]] = []
+        if scan_id:
+            clauses.append({"dataset.urlscan.scan_id": scan_id})
+        if url:
+            clauses.append({"submitted_url": url})
+        if clauses and self.jobs.find_one({"dataset.kind": "urlscan_phishing", "$or": clauses}, {"_id": 1}):
+            return True
+        return False
+
+    def dataset_queue_counts(self) -> dict[str, int]:
+        counts = {"queued": 0, "running": 0, "ready": 0, "failed": 0, "timeout": 0}
+        for item in self.dataset_queue_items(limit=500):
+            status = item.get("status")
+            if status in counts:
+                counts[status] += 1
+        return counts
+
+    def dataset_ready_count(self) -> int:
+        return len(self.dataset_ready_items(limit=500))
+
+    def dataset_queue_items(self, limit: int = 50) -> list[dict[str, Any]]:
+        query = {"dataset.kind": "urlscan_phishing", "status": {"$in": [JOB_QUEUED, JOB_RUNNING, JOB_SUCCEEDED, JOB_FAILED, JOB_TIMEOUT]}}
+        jobs = list(self.jobs.find(query).sort("updated_at", DESCENDING).limit(limit * 4))
+        items: list[dict[str, Any]] = []
+        for job in jobs:
+            dataset = job.get("dataset") if isinstance(job.get("dataset"), dict) else {}
+            urlscan = dataset.get("urlscan") if isinstance(dataset.get("urlscan"), dict) else {}
+            raw_id = job.get("raw_id")
+            status = job.get("status")
+            raw_doc = None
+            if status == JOB_SUCCEEDED and raw_id:
+                raw_doc = self.get_raw(raw_id)
+                if not raw_doc or raw_doc.get("status") != "ok":
+                    continue
+                if self.dataset_decision_exists(raw_id=raw_id, scan_id=urlscan.get("scan_id"), url=job.get("submitted_url")):
+                    continue
+                status = "ready"
+            elif self.dataset_decision_exists(scan_id=urlscan.get("scan_id"), url=job.get("submitted_url")):
+                continue
+
+            item = {
+                "job_id": job.get("job_id"),
+                "status": status,
+                "submitted_url": job.get("submitted_url"),
+                "updated_at": job.get("updated_at"),
+                "raw_id": raw_id,
+                "final_url": raw_doc.get("final_url") if raw_doc else None,
+                "urlscan": {
+                    "scan_id": urlscan.get("scan_id"),
+                    "result_url": urlscan.get("result_url"),
+                    "page_url": urlscan.get("page_url"),
+                },
+            }
+            items.append(_jsonable({key: value for key, value in item.items() if value is not None}))
+            if len(items) >= limit:
+                break
+        return items
+
+    def dataset_ready_items(self, limit: int = 50) -> list[dict[str, Any]]:
+        query = {"dataset.kind": "urlscan_phishing", "status": JOB_SUCCEEDED, "raw_id": {"$exists": True}}
+        jobs = list(self.jobs.find(query).sort("finished_at", DESCENDING).limit(limit * 4))
+        items: list[dict[str, Any]] = []
+        for job in jobs:
+            raw_id = job.get("raw_id")
+            raw_doc = self.get_raw(raw_id)
+            if not raw_doc or raw_doc.get("status") != "ok":
+                continue
+
+            dataset = job.get("dataset") if isinstance(job.get("dataset"), dict) else {}
+            urlscan = dataset.get("urlscan") if isinstance(dataset.get("urlscan"), dict) else {}
+            submitted_url = job.get("submitted_url") or raw_doc.get("submitted_url")
+            if self.dataset_decision_exists(raw_id=raw_id, scan_id=urlscan.get("scan_id"), url=submitted_url):
+                continue
+
+            items.append(
+                _jsonable(
+                    {
+                        "job_id": job.get("job_id"),
+                        "status": "ready",
+                        "submitted_url": submitted_url,
+                        "final_url": raw_doc.get("final_url"),
+                        "updated_at": job.get("finished_at") or job.get("updated_at"),
+                        "raw_id": raw_id,
+                        "urlscan": {
+                            "scan_id": urlscan.get("scan_id"),
+                            "result_url": urlscan.get("result_url"),
+                            "page_url": urlscan.get("page_url"),
+                        },
+                    }
+                )
+            )
+            if len(items) >= limit:
+                break
+        return items
+
+    def dataset_source_for_raw(self, raw_id: Any) -> dict[str, Any]:
+        oid = _object_id(raw_id)
+        raw_doc = self.get_raw(oid) if oid else None
+        urlscan = raw_doc.get("urlscan") if raw_doc and isinstance(raw_doc.get("urlscan"), dict) else {}
+        if not urlscan and oid:
+            job = self.jobs.find_one({"dataset.kind": "urlscan_phishing", "raw_id": oid}, sort=[("updated_at", DESCENDING)])
+            dataset = job.get("dataset") if job and isinstance(job.get("dataset"), dict) else {}
+            urlscan = dataset.get("urlscan") if isinstance(dataset.get("urlscan"), dict) else {}
+        return _jsonable(urlscan or {})
+
+    def get_raw_screenshot(self, raw_id: Any) -> tuple[bytes, dict[str, Any]] | None:
+        raw_doc = self.get_raw(raw_id)
+        if not raw_doc:
+            return None
+        screenshot = raw_doc.get("screenshot") if isinstance(raw_doc.get("screenshot"), dict) else {}
+        file_id = screenshot.get("gridfs_file_id")
+        if not file_id:
+            return None
+        output = io.BytesIO()
+        try:
+            self.screenshot_bucket.download_to_stream(file_id, output)
+        except NoFile:
+            return None
+        return output.getvalue(), screenshot
+
+    def insert_curated_decision(
+        self,
+        *,
+        raw_doc: dict[str, Any],
+        decision: str,
+        api_document: dict[str, Any],
+        verdict: str | None = None,
+        confidence: float | None = None,
+        organization_brand: str | None = None,
+        response_text: str | None = None,
+        blocks: list[dict[str, Any]] | None = None,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        raw_id = _object_id(raw_doc.get("_id"))
+        if not raw_id:
+            raise ValueError("Raw document is missing a valid _id")
+        now = utc_now()
+        urlscan = raw_doc.get("urlscan") if isinstance(raw_doc.get("urlscan"), dict) else {}
+        if not urlscan:
+            urlscan = self.dataset_source_for_raw(raw_id)
+        doc: dict[str, Any] = {
+            "decision": decision,
+            "raw_id": raw_id,
+            "raw_url": raw_doc.get("submitted_url"),
+            "final_url": raw_doc.get("final_url"),
+            "urlscan": urlscan,
+            "api_document": api_document,
+            "created_at": now,
+            "updated_at": now,
+        }
+        if decision == "accepted":
+            doc["verdict"] = verdict
+            doc["confidence"] = confidence
+            doc["organization_brand"] = organization_brand
+            doc["response_text"] = response_text or ""
+            doc["blocks"] = blocks or []
+        else:
+            doc["reason"] = reason
+        self.curated.replace_one({"raw_id": raw_id}, doc, upsert=True)
+        return _jsonable(doc)
 
     def delete_job(self, job_id: str) -> None:
         self.jobs.delete_one({"job_id": job_id})

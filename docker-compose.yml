@@ -1,13 +1,14 @@
 services:
   api:
     build: .
-    env_file:
-      - .env
     environment:
+      MONGO_URI: ${MONGO_URI}
       MONGO_DB: phishtrain
       MONGO_COLLECTION: raw
       MONGO_JOBS_COLLECTION: jobs
+      MONGO_CURATED_COLLECTION: curated
       SCREENSHOT_BUCKET: screenshots
+      URLSCAN_API_KEY: ${URLSCAN_API_KEY}
       REDIS_URL: redis://redis:6379/0
       RQ_QUEUE_NAME: scrape
       WORKER_CONCURRENCY: "4"
@@ -20,8 +21,19 @@ services:
       SPIDER_PAGE_TIMEOUT_MS: "8000"
       SPIDER_JOB_TIMEOUT_SECONDS: "180"
       ALLOW_PRIVATE_URLS: "false"
+      DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD}
+      DASHBOARD_LOG_TAIL: "200"
+      TOP_1M_PIPELINE_CSV_PATH: /app/top-1m.csv
+      TOP_1M_PIPELINE_PROGRESS_PATH: /app/state/top-1m-spider-progress.json
+      TOP_1M_PIPELINE_CONTROL_PATH: /app/state/top-1m-spider-control.json
+      URLSCAN_PIPELINE_PROGRESS_PATH: /app/state/urlscan-phishing-progress.json
+      URLSCAN_PIPELINE_CONTROL_PATH: /app/state/urlscan-phishing-control.json
     ports:
-      - "8000:8000"
+      - "0.0.0.0:8000:8000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./top-1m.csv:/app/top-1m.csv:ro
+      - pipeline-state:/app/state
     shm_size: "1gb"
     depends_on:
       - redis
@@ -34,12 +46,12 @@ services:
 
   worker:
     build: .
-    env_file:
-      - .env
     environment:
+      MONGO_URI: ${MONGO_URI}
       MONGO_DB: phishtrain
       MONGO_COLLECTION: raw
       MONGO_JOBS_COLLECTION: jobs
+      MONGO_CURATED_COLLECTION: curated
       SCREENSHOT_BUCKET: screenshots
       REDIS_URL: redis://redis:6379/0
       RQ_QUEUE_NAME: scrape
@@ -66,3 +78,4 @@ services:
 
 volumes:
   redis-data:
+  pipeline-state:

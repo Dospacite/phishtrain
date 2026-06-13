@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -54,6 +54,29 @@ class ScrapeRequest(BaseModel):
 
 class SpiderRequest(BaseModel):
     url: str = Field(min_length=1, max_length=4096)
+
+
+class ReferenceSelection(BaseModel):
+    pointer: str = Field(min_length=1, max_length=1024)
+
+
+class CurationBlock(BaseModel):
+    text: str = Field(min_length=1, max_length=10_000)
+    references: list[ReferenceSelection] = Field(default_factory=list, max_length=100)
+
+
+class CuratedDatasetRequest(BaseModel):
+    raw_id: str = Field(min_length=1, max_length=128)
+    verdict: Literal["phishing", "benign"]
+    confidence: float = Field(ge=0, le=1)
+    organization_brand: str = Field(min_length=1, max_length=512)
+    response_text: str = Field(min_length=1, max_length=50_000)
+    blocks: list[CurationBlock] = Field(default_factory=list, max_length=100)
+
+
+class SkipDatasetRequest(BaseModel):
+    raw_id: str = Field(min_length=1, max_length=128)
+    reason: str | None = Field(default=None, max_length=2_000)
 
 
 class JobHandle(BaseModel):

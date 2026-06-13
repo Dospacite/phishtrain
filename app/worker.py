@@ -74,6 +74,11 @@ def run_scrape_job(job_id: str) -> str:
 
         with url_time_limit(settings.scrape_url_timeout_ms / 1000):
             artifact = scrape_url(job["submitted_url"], settings)
+        if isinstance(job.get("dataset"), dict):
+            artifact.raw_doc["dataset"] = job["dataset"]
+            urlscan = job["dataset"].get("urlscan") if isinstance(job["dataset"].get("urlscan"), dict) else None
+            if urlscan:
+                artifact.raw_doc["urlscan"] = urlscan
         raw_id = storage.insert_raw(artifact.raw_doc, artifact.screenshot_webp, artifact.screenshot_metadata)
         storage.mark_job_succeeded(job_id, raw_id)
         return "succeeded"
