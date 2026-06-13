@@ -16,7 +16,7 @@ def get_redis_connection(redis_url: str | None = None) -> Redis:
 
 def get_queue(settings: Settings | None = None) -> Queue:
     settings = settings or get_settings()
-    return Queue(settings.rq_queue_name, connection=get_redis_connection(settings.redis_url))
+    return Queue(settings.scrape_queue_name, connection=get_redis_connection(settings.redis_url))
 
 
 def get_preflight_queue(settings: Settings | None = None) -> Queue:

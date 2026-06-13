@@ -6,6 +6,7 @@ import json
 import secrets
 import threading
 import traceback
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -73,6 +74,41 @@ def queue_details(queue: Queue) -> dict[str, Any]:
     }
 
 
+def queue_started_job_ids(queue: Queue) -> set[str]:
+    registry = queue.started_job_registry
+    get_job_ids = getattr(registry, "get_job_ids", None)
+    if callable(get_job_ids):
+        return set(str(job_id) for job_id in get_job_ids(cleanup=False))
+    return set()
+
+
+def reconcile_running_jobs(storage: MongoStorage, queue: Queue, settings: Settings) -> dict[str, int]:
+    if not hasattr(storage, "mark_orphaned_running_jobs"):
+        return {"scrape": 0, "preflight": 0}
+    main_active = _safe_call(None, lambda: queue_started_job_ids(queue))
+    preflight_active = _safe_call(None, lambda: queue_started_job_ids(get_preflight_queue(settings)))
+    result = {"scrape": 0, "preflight": 0}
+    if main_active is not None:
+        result["scrape"] = storage.mark_orphaned_running_jobs(main_active, preflight=False)
+    if preflight_active is not None:
+        result["preflight"] = storage.mark_orphaned_running_jobs(preflight_active, preflight=True)
+    return result
+
+
+def clear_waiting_queues(main_queue: Queue, settings: Settings) -> dict[str, Any]:
+    queues = [main_queue]
+    preflight_queue = get_preflight_queue(settings)
+    if preflight_queue.name != main_queue.name:
+        queues.append(preflight_queue)
+
+    results = []
+    for queue in queues:
+        before = int(queue.count)
+        queue.empty()
+        results.append({"name": queue.name, "cleared": before, "queued": int(queue.count)})
+    return {"status": "cleared", "cleared": sum(item["cleared"] for item in results), "queues": results}
+
+
 def _utc_iso() -> str:
     from datetime import datetime, timezone
 
@@ -108,23 +144,57 @@ def _run_pipeline(settings: Settings) -> None:
     try:
         storage = MongoStorage(settings)
         storage.ensure_indexes()
-        queue = get_preflight_queue(settings)
-        summary = queue_top_1m_spider_jobs(
-            csv_path=Path(settings.top_1m_pipeline_csv_path),
-            storage=storage,
-            queue=queue,
-            settings=settings,
-            progress_path=Path(settings.top_1m_pipeline_progress_path),
-            continue_run=True,
-            force_new=False,
-            show_progress=False,
-            should_pause=lambda: pipeline_control(settings).get("paused") is True,
-        )
+        preflight_queue = get_preflight_queue(settings)
+        main_queue = get_queue(settings)
+        total_summary = {"total": 0, "processed": 0, "queued": 0, "cache_hits": 0, "skipped": 0}
+
+        def paused() -> bool:
+            return pipeline_control(settings).get("paused") is True
+
+        def backlog() -> int:
+            def started_count(queue: Queue) -> int:
+                count = queue.started_job_registry.count
+                return int(count() if callable(count) else count)
+
+            return (
+                int(preflight_queue.count)
+                + started_count(preflight_queue)
+                + int(main_queue.count)
+                + started_count(main_queue)
+            )
+
+        while not paused():
+            summary = queue_top_1m_spider_jobs(
+                csv_path=Path(settings.top_1m_pipeline_csv_path),
+                storage=storage,
+                queue=preflight_queue,
+                settings=settings,
+                progress_path=Path(settings.top_1m_pipeline_progress_path),
+                continue_run=True,
+                force_new=False,
+                show_progress=False,
+                should_pause=paused,
+                capacity_count=backlog,
+            )
+            for key, value in summary.__dict__.items():
+                total_summary[key] = int(total_summary.get(key, 0)) + int(value)
+            _pipeline_last_run = {
+                "status": "running",
+                "started_at": started_at,
+                "updated_at": _utc_iso(),
+                "summary": dict(total_summary),
+                "backlog": backlog(),
+            }
+            if summary.processed == 0:
+                if backlog() >= settings.pipeline_enqueue_batch_size:
+                    time.sleep(settings.pipeline_refill_interval_seconds)
+                    continue
+                break
         _pipeline_last_run = {
             "status": "finished",
             "started_at": started_at,
             "finished_at": _utc_iso(),
-            "summary": summary.__dict__,
+            "summary": total_summary,
         }
     except Exception as exc:
         _pipeline_last_run = {
@@ -365,6 +435,7 @@ def docker_logs(service: str, tail: int) -> str:
 def dashboard_payload(storage: MongoStorage, queue: Queue, settings: Settings) -> dict[str, Any]:
     active_statuses = [JOB_QUEUED, JOB_RUNNING]
     terminal_statuses = [JOB_SUCCEEDED, JOB_FAILED, JOB_TIMEOUT]
+    reconciled = _safe_call({"scrape": 0, "preflight": 0}, lambda: reconcile_running_jobs(storage, queue, settings))
     return {
         "jobs": {
             "counts": _safe_call({}, storage.job_status_counts),
@@ -376,6 +447,7 @@ def dashboard_payload(storage: MongoStorage, queue: Queue, settings: Settings) -
             "status_counts": _safe_call({}, storage.raw_status_counts),
         },
         "queue": _safe_call({}, lambda: queue_details(queue)),
+        "reconciled_running_jobs": reconciled,
         "pipeline": pipeline_status(settings),
         "urlscan_pipeline": urlscan_pipeline_status(settings, storage),
         "docker": docker_service_statuses(),
@@ -386,9 +458,13 @@ def dashboard_payload(storage: MongoStorage, queue: Queue, settings: Settings) -
             "jobs_collection": settings.mongo_jobs_collection,
             "worker_concurrency": settings.worker_concurrency,
             "preflight_queue_name": settings.preflight_queue_name,
+            "scrape_queue_name": settings.scrape_queue_name,
             "preflight_timeout_seconds": settings.preflight_timeout_seconds,
             "pipeline_enqueue_batch_size": settings.pipeline_enqueue_batch_size,
+            "pipeline_refill_interval_seconds": settings.pipeline_refill_interval_seconds,
             "rq_job_timeout_seconds": settings.rq_job_timeout_seconds,
+            "rq_failure_ttl_seconds": settings.rq_failure_ttl_seconds,
+            "rq_timeout_grace_seconds": settings.rq_timeout_grace_seconds,
             "spider_job_timeout_seconds": settings.spider_job_timeout_seconds,
             "allow_private_urls": settings.allow_private_urls,
         },
@@ -523,6 +599,7 @@ def dashboard_html() -> str:
       cursor: pointer;
     }}
     button.active {{ border-color: var(--accent); color: var(--accent); }}
+    button.danger {{ border-color: rgba(251, 113, 133, .55); color: var(--bad); }}
     pre {{
       margin: 0;
       min-height: 300px;
@@ -578,7 +655,13 @@ def dashboard_html() -> str:
       </div>
     </section>
     <section class="panel">
-      <div class="panel-head"><h2>Operations</h2><span class="meta">runtime</span></div>
+      <div class="panel-head">
+        <h2>Operations</h2>
+        <div class="actions">
+          <button class="danger" id="queue-clear">Clear queue</button>
+          <span class="meta">runtime</span>
+        </div>
+      </div>
       <div class="kv" id="ops"></div>
     </section>
     <section class="columns">
@@ -659,6 +742,7 @@ def dashboard_html() -> str:
       const services = (data.docker.services || []).map(s => `${{s.service}}: ${{s.status}}`).join(" | ");
       document.getElementById("ops").innerHTML = Object.entries({
         "Queue": data.queue.name,
+        "Scrape queue": data.settings.scrape_queue_name,
         "Preflight queue": data.settings.preflight_queue_name,
         "Redis": data.settings.redis_url,
         "Mongo DB": data.settings.mongo_db,
@@ -666,8 +750,11 @@ def dashboard_html() -> str:
         "Jobs collection": data.settings.jobs_collection,
         "Worker concurrency": data.settings.worker_concurrency,
         "Pipeline batch cap": data.settings.pipeline_enqueue_batch_size,
+        "Pipeline refill interval": `${{data.settings.pipeline_refill_interval_seconds}}s`,
         "Preflight timeout": `${{data.settings.preflight_timeout_seconds}}s`,
         "Scrape timeout": `${{data.settings.rq_job_timeout_seconds}}s`,
+        "Failure TTL": `${{data.settings.rq_failure_ttl_seconds}}s`,
+        "Timeout grace": `${{data.settings.rq_timeout_grace_seconds}}s`,
         "Spider timeout": `${{data.settings.spider_job_timeout_seconds}}s`,
         "Docker": data.docker.available ? services : data.docker.error
       }).map(([key, value]) => `<div>${{key}}</div><div>${{fmt(value)}}</div>`).join("");
@@ -708,6 +795,18 @@ def dashboard_html() -> str:
       await loadStatus();
     }}
 
+    async function clearQueue() {{
+      if (!confirm("Clear all waiting jobs from the scrape and preflight queues? Running jobs will continue.")) return;
+      const response = await fetch("/dashboard/api/queue/clear", {{ method: "POST", cache: "no-store" }});
+      if (!response.ok) {{
+        document.getElementById("health").textContent = `Clear queue failed: status ${{response.status}}`;
+        return;
+      }}
+      const data = await response.json();
+      document.getElementById("health").textContent = `Cleared ${{number(data.cleared)}} waiting jobs`;
+      await loadStatus();
+    }}
+
     document.querySelectorAll(".tab").forEach(button => {{
       button.addEventListener("click", () => {{
         state.service = button.dataset.service;
@@ -721,6 +820,7 @@ def dashboard_html() -> str:
     document.getElementById("pipeline-pause").addEventListener("click", () => pipelineAction("pause"));
     document.getElementById("urlscan-pipeline-start").addEventListener("click", () => urlscanPipelineAction("start"));
     document.getElementById("urlscan-pipeline-pause").addEventListener("click", () => urlscanPipelineAction("pause"));
+    document.getElementById("queue-clear").addEventListener("click", clearQueue);
 
     loadStatus();
     loadLogs();
@@ -1523,6 +1623,13 @@ def create_dashboard_router(storage_dependency: Callable[..., MongoStorage], que
         settings: Settings = Depends(get_settings),
     ) -> PlainTextResponse:
         return PlainTextResponse(docker_logs(service, tail or settings.dashboard_log_tail))
+
+    @router.post("/api/queue/clear")
+    def dashboard_clear_queue(
+        settings: Settings = Depends(get_settings),
+        queue: Queue = Depends(queue_dependency),
+    ):
+        return clear_waiting_queues(queue, settings)
 
     @router.get("/api/phishing-dataset/queue")
     def dashboard_phishing_dataset_queue(

@@ -18,6 +18,21 @@ def handle_for_job(job_id: str, status: str, cache_hit: bool) -> JobHandle:
     return JobHandle(job_id=job_id, status=status, cache_hit=cache_hit, result_url=f"/jobs/{job_id}/result")
 
 
+def _enqueue_rq_job(queue: Queue, func, job_id: str, *, timeout: int, failure_ttl: int) -> None:
+    if hasattr(queue, "enqueue_call"):
+        queue.enqueue_call(
+            func=func,
+            args=(job_id,),
+            timeout=timeout,
+            retry=None,
+            result_ttl=0,
+            failure_ttl=failure_ttl,
+            job_id=job_id,
+        )
+        return
+    queue.enqueue(func, job_id, job_timeout=timeout, retry=None, result_ttl=0, failure_ttl=failure_ttl)
+
+
 def create_or_enqueue_scrape_job(
     *,
     submitted_url: str,
@@ -55,7 +70,13 @@ def create_or_enqueue_scrape_job(
     from app.worker import run_scrape_job
 
     try:
-        queue.enqueue(run_scrape_job, job_id, job_timeout=settings.rq_job_timeout_seconds, retry=None, result_ttl=0, failure_ttl=0)
+        _enqueue_rq_job(
+            queue,
+            run_scrape_job,
+            job_id,
+            timeout=max(settings.rq_job_timeout_seconds, int(settings.scrape_url_timeout_ms / 1000) + settings.rq_timeout_grace_seconds),
+            failure_ttl=settings.rq_failure_ttl_seconds,
+        )
     except Exception:
         storage.delete_job(job_id)
         raise
@@ -93,5 +114,11 @@ def create_or_enqueue_spider_job(
     storage.create_job(job_id=job_id, submitted_url=submitted_url, cache_key=cache_key, status=JOB_QUEUED, cache_hit=False)
     from app.worker import run_spider_job
 
-    queue.enqueue(run_spider_job, job_id, job_timeout=settings.spider_job_timeout_seconds, retry=None, result_ttl=0, failure_ttl=0)
+    _enqueue_rq_job(
+        queue,
+        run_spider_job,
+        job_id,
+        timeout=settings.spider_job_timeout_seconds + settings.rq_timeout_grace_seconds,
+        failure_ttl=settings.rq_failure_ttl_seconds,
+    )
     return handle_for_job(job_id, JOB_QUEUED, False)

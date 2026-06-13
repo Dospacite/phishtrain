@@ -76,14 +76,19 @@ def create_or_enqueue_preflight_job(
         },
     )
     try:
-        queue.enqueue(
-            run_preflight_job,
-            job_id,
-            job_timeout=max(settings.preflight_timeout_seconds + 15, 30),
-            retry=None,
-            result_ttl=0,
-            failure_ttl=0,
-        )
+        timeout = max(settings.preflight_timeout_seconds + 15, 30)
+        if hasattr(queue, "enqueue_call"):
+            queue.enqueue_call(
+                func=run_preflight_job,
+                args=(job_id,),
+                timeout=timeout,
+                retry=None,
+                result_ttl=0,
+                failure_ttl=settings.rq_failure_ttl_seconds,
+                job_id=job_id,
+            )
+        else:
+            queue.enqueue(run_preflight_job, job_id, job_timeout=timeout, retry=None, result_ttl=0, failure_ttl=settings.rq_failure_ttl_seconds)
     except Exception:
         storage.delete_job(job_id)
         raise

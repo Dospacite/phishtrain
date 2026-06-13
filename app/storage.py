@@ -343,14 +343,18 @@ class MongoStorage:
 
     def job_status_counts(self) -> dict[str, int]:
         counts = {status: 0 for status in (JOB_QUEUED, JOB_RUNNING, JOB_SUCCEEDED, JOB_FAILED, JOB_TIMEOUT)}
-        for row in self.jobs.aggregate([{"$group": {"_id": "$status", "count": {"$sum": 1}}}]):
+        pipeline = [
+            {"$match": {"preflight": {"$exists": False}}},
+            {"$group": {"_id": "$status", "count": {"$sum": 1}}},
+        ]
+        for row in self.jobs.aggregate(pipeline):
             status = row.get("_id")
             if status:
                 counts[str(status)] = int(row.get("count", 0))
         return counts
 
     def recent_jobs(self, statuses: list[str] | None = None, limit: int = 25) -> list[dict[str, Any]]:
-        query: dict[str, Any] = {}
+        query: dict[str, Any] = {"preflight": {"$exists": False}}
         if statuses:
             query["status"] = {"$in": statuses}
         return list(self.jobs.find(query).sort("updated_at", DESCENDING).limit(limit))
@@ -579,6 +583,26 @@ class MongoStorage:
 
     def mark_job_timeout(self, job_id: str, error: str, raw_id: Any = None) -> None:
         self._mark_terminal(job_id, JOB_TIMEOUT, error, raw_id)
+
+    def mark_orphaned_running_jobs(self, active_job_ids: set[str], *, preflight: bool) -> int:
+        query: dict[str, Any] = {
+            "status": JOB_RUNNING,
+            "job_id": {"$nin": list(active_job_ids)},
+            "preflight": {"$exists": preflight},
+        }
+        now = utc_now()
+        result = self.jobs.update_many(
+            query,
+            {
+                "$set": {
+                    "status": JOB_FAILED,
+                    "error": "Marked failed because no active RQ execution was found",
+                    "finished_at": now,
+                    "updated_at": now,
+                }
+            },
+        )
+        return int(result.modified_count)
 
     def _mark_terminal(self, job_id: str, status: str, error: str, raw_id: Any = None) -> None:
         now = utc_now()

@@ -26,6 +26,9 @@ class FakeQueue:
     deferred_job_registry = FakeRegistry(0)
     scheduled_job_registry = FakeRegistry(0)
 
+    def empty(self):
+        self.count = 0
+
 
 class FakeStorage:
     def job_status_counts(self):
@@ -200,6 +203,36 @@ def test_dashboard_pipeline_start_uses_runtime_start_function(tmp_path, monkeypa
 
     assert response.status_code == 200
     assert response.json() == {"status": "started", "running": True}
+
+
+def test_dashboard_clear_queue_is_protected_and_clears_main_and_preflight(tmp_path, monkeypatch):
+    class ClearableQueue(FakeQueue):
+        def __init__(self, name, count):
+            self.name = name
+            self.count = count
+            self.started_job_registry = FakeRegistry(0)
+            self.finished_job_registry = FakeRegistry(0)
+            self.failed_job_registry = FakeRegistry(0)
+            self.deferred_job_registry = FakeRegistry(0)
+            self.scheduled_job_registry = FakeRegistry(0)
+
+    main_queue = ClearableQueue("scrape", 7)
+    preflight_queue = ClearableQueue("preflight", 11)
+    client = dashboard_client(tmp_path, monkeypatch)
+    app.dependency_overrides[queue_dep] = lambda: main_queue
+    monkeypatch.setattr("app.dashboard.get_preflight_queue", lambda settings: preflight_queue)
+
+    try:
+        unauthorized = client.post("/dashboard/api/queue/clear")
+        response = client.post("/dashboard/api/queue/clear", auth=("admin", "secret"))
+    finally:
+        app.dependency_overrides.clear()
+
+    assert unauthorized.status_code == 401
+    assert response.status_code == 200
+    assert response.json()["cleared"] == 18
+    assert main_queue.count == 0
+    assert preflight_queue.count == 0
 
 
 def test_dashboard_urlscan_pipeline_start_uses_runtime_start_function(tmp_path, monkeypatch):

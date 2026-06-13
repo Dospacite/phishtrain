@@ -222,6 +222,29 @@ def test_pipeline_honors_enqueue_batch_cap(tmp_path, monkeypatch):
     assert [job["submitted_url"] for job in storage.created] == ["https://1.test/", "https://2.test/", "https://3.test/"]
 
 
+def test_pipeline_tops_up_only_available_queue_capacity(tmp_path, monkeypatch):
+    csv_path = tmp_path / "top-1m.csv"
+    progress_path = tmp_path / "progress.json"
+    write_top_csv(csv_path, [f"{index}.test" for index in range(1, 8)])
+    storage = FakeStorage()
+    queue = FakeQueue()
+
+    summary = queue_top_1m_spider_jobs(
+        csv_path=csv_path,
+        storage=storage,
+        queue=queue,
+        settings=Settings(pipeline_enqueue_batch_size=5),
+        progress_path=progress_path,
+        start_positions=(1,),
+        show_progress=False,
+        capacity_count=lambda: 3,
+    )
+
+    assert summary.queued == 2
+    assert len(queue.enqueued) == 2
+    assert [job["submitted_url"] for job in storage.created] == ["https://1.test/", "https://2.test/"]
+
+
 def test_parser_exposes_continue_option():
     args = build_arg_parser().parse_args(["--continue", "--starts", "1,250000,500000,750000"])
 

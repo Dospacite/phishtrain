@@ -13,7 +13,7 @@ from app.settings import get_settings
 from app.storage import MongoStorage
 
 
-class UrlTimeoutError(TimeoutError):
+class UrlTimeoutError(BaseException):
     pass
 
 

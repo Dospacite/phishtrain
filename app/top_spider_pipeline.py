@@ -185,6 +185,7 @@ def queue_top_1m_spider_jobs(
     show_progress: bool = True,
     state_save_interval: int = 1,
     should_pause: Callable[[], bool] | None = None,
+    capacity_count: Callable[[], int] | None = None,
 ) -> QueueSummary:
     starts = tuple(sorted(start_positions))
     rows_by_rank = load_top_sites(csv_path)
@@ -199,13 +200,18 @@ def queue_top_1m_spider_jobs(
     processed = queued = cache_hits = skipped = 0
     save_every = max(1, state_save_interval)
 
+    def current_backlog() -> int:
+        if capacity_count is not None:
+            return max(0, int(capacity_count()))
+        return max(0, int(getattr(queue, "count", 0)))
+
     with tqdm(total=total, desc="Queue spider jobs", unit="url", disable=not show_progress) as progress_bar:
         for site in iter_top_sites(rows_by_rank, starts, next_ranks):
             if should_pause and should_pause():
                 break
             if limit is not None and processed >= limit:
                 break
-            if queued >= batch_limit:
+            if current_backlog() + queued >= batch_limit:
                 break
 
             handle = create_or_enqueue_preflight_job(
